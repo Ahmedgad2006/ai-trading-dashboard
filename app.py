@@ -1,15 +1,14 @@
-# ------------------------------------------------------------------
-#  REAL pipeline (reuse your Cell-7 logic)
-# ------------------------------------------------------------------
 import pandas as pd
 import asyncio
 import os
 import logging
+import streamlit as st
+from main_pipeline import add_indicators, prepare_features  # Correct import
 
-# same folders as Colab
-RAW_DATA_DIR   = "/content/drive/MyDrive/trading_ai/data/raw"
-PROCESSED_DATA_DIR = "/content/drive/MyDrive/trading_ai/data/processed"
-MODEL_DIR      = "/content/drive/MyDrive/trading_ai/models"
+# Adjust paths for Codespaces/local environment
+RAW_DATA_DIR = "./data/raw"
+PROCESSED_DATA_DIR = "./data/processed"
+MODEL_DIR = "./models"
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +28,7 @@ def run_pipeline_for_list(tickers):
             if all(df.empty for df in raw.values()):
                 continue
 
-            # ---- add indicators (reuse your Cell-4 add_indicators) ----
-            from main_indicators import add_indicators   # inline below
+            # ---- add indicators ----
             processed = {}
             for tf, df in raw.items():
                 if not df.empty:
@@ -58,7 +56,7 @@ def run_pipeline_for_list(tickers):
             # ---- same shape as fake_signals ----
             results.append({
                 "symbol": symbol,
-                "signal": preds.get("1d", ("HOLD", 0.0))[0],   # use 1-day as final vote
+                "signal": preds.get("1d", ("HOLD", 0.0))[0],  # use 1-day as final vote
                 "confidence": preds.get("1d", ("HOLD", 0.0))[1],
                 "entry": round(float(processed["1d"]["close"].iloc[-1]), 2),
                 "tp": round(float(processed["1d"]["close"].iloc[-1]) + 1.5 * float(processed["1d"]["atr"].iloc[-1]), 2),
@@ -74,3 +72,14 @@ def run_pipeline_for_list(tickers):
                 "entry": 0, "tp": 0, "sl": 0, "atr": 0, "kelly": 0, "s1": 0, "r1": 0
             })
     return pd.DataFrame(results)
+
+def main():
+    st.title("Trading Dashboard")
+    tickers = st.text_input("Enter tickers (comma-separated)", "AAPL,GOOGL").split(",")
+    if st.button("Run Pipeline"):
+        with st.spinner("Processing..."):
+            results = run_pipeline_for_list([t.strip() for t in tickers])
+            st.write(results)
+
+if __name__ == "__main__":
+    main()

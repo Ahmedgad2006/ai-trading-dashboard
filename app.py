@@ -1,29 +1,76 @@
-import streamlit as st
+# ------------------------------------------------------------------
+#  REAL pipeline (reuse your Cell-7 logic)
+# ------------------------------------------------------------------
 import pandas as pd
-import os, asyncio, logging, requests
-from main_pipeline import run_pipeline_for_list   # reuse your Cell-7 logic
+import asyncio
+import os
+import logging
 
-st.set_page_config(page_title="AI Trading Dashboard", layout="wide")
-st.title("📊 AI Trading Signal Dashboard")
+# same folders as Colab
+RAW_DATA_DIR   = "/content/drive/MyDrive/trading_ai/data/raw"
+PROCESSED_DATA_DIR = "/content/drive/MyDrive/trading_ai/data/processed"
+MODEL_DIR      = "/content/drive/MyDrive/trading_ai/models"
 
-# ---- user input ----
-tickers = st.text_input("Enter tickers (comma or space):", "AMD,NVDA,SMH,BTC/USD").upper().split(",")
-tickers = [t.strip() for t in tickers if t.strip()]
+logger = logging.getLogger(__name__)
 
-# ---- run analysis ----
-if st.button("Analyze"):
-    with st.spinner("Running AI pipeline …"):
-        df = asyncio.run(run_pipeline_for_list(tickers))
-    if df.empty:
-        st.warning("No signals generated – check tickers or data.")
-    else:
-        st.success("Done!")
-        st.dataframe(df)
+def run_pipeline_for_list(tickers):
+    """
+    Reads CSVs → adds indicators → loads GPU-trained model → predicts.
+    Returns DataFrame exactly like fake_signals().
+    """
+    results = []
+    for symbol in tickers:
+        try:
+            raw = {}
+            for tf in ["5min", "15min", "1h", "1d"]:
+                path = os.path.join(RAW_DATA_DIR, f"{symbol.replace('/', '-')}_{tf}.csv")
+                raw[tf] = pd.read_csv(path, parse_dates=["datetime"]) if os.path.exists(path) else pd.DataFrame()
 
-        csv = df.to_csv(index=False)
-        st.download_button("Download CSV", csv, "signals.csv", "text/csv")
+            if all(df.empty for df in raw.values()):
+                continue
 
-# ---- last Telegram alert (optional) ----
-if st.checkbox("Show last Telegram alert"):
-    last = os.getenv("LAST_ALERT", "No alert yet")
-    st.text(last)
+            # ---- add indicators (reuse your Cell-4 add_indicators) ----
+            from main_indicators import add_indicators   # inline below
+            processed = {}
+            for tf, df in raw.items():
+                if not df.empty:
+                    df = add_indicators(df)
+                    processed[tf] = df
+            if not processed:
+                continue
+
+            # ---- load GPU-trained model → predict ----
+            preds = {}
+            for tf in ["5min", "15min", "1h", "1d"]:
+                model_path = os.path.join(MODEL_DIR, f"{tf}_model.pkl")
+                if not os.path.exists(model_path):
+                    preds[tf] = ("HOLD", 0.0)
+                    continue
+                model = pd.read_pickle(model_path)
+                X = prepare_features(processed[tf].iloc[[-1]])
+                if X.empty:
+                    preds[tf] = ("HOLD", 0.0)
+                    continue
+                pred = model.predict(X)[0]
+                prob = model.predict_proba(X)[0][pred]
+                preds[tf] = (["BUY", "HOLD", "SELL"][pred], round(prob * 100, 1))
+
+            # ---- same shape as fake_signals ----
+            results.append({
+                "symbol": symbol,
+                "signal": preds.get("1d", ("HOLD", 0.0))[0],   # use 1-day as final vote
+                "confidence": preds.get("1d", ("HOLD", 0.0))[1],
+                "entry": round(float(processed["1d"]["close"].iloc[-1]), 2),
+                "tp": round(float(processed["1d"]["close"].iloc[-1]) + 1.5 * float(processed["1d"]["atr"].iloc[-1]), 2),
+                "sl": round(float(processed["1d"]["close"].iloc[-1]) - 1.5 * float(processed["1d"]["atr"].iloc[-1]), 2),
+                "atr": round(float(processed["1d"]["atr"].iloc[-1]), 2),
+                "kelly": round(float(processed["1d"]["close"].iloc[-1]) * 0.25, 2),  # placeholder
+                "s1": round(float(processed["1d"]["low"].tail(20).min()), 2),
+                "r1": round(float(processed["1d"]["high"].tail(20).max()), 2),
+            })
+        except Exception as e:
+            results.append({
+                "symbol": symbol, "signal": "ERROR", "confidence": 0.0,
+                "entry": 0, "tp": 0, "sl": 0, "atr": 0, "kelly": 0, "s1": 0, "r1": 0
+            })
+    return pd.DataFrame(results)

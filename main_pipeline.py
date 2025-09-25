@@ -1,27 +1,22 @@
-import os, pandas as pd, asyncio, logging
-from sklearn.ensemble import RandomForestClassifier
+import os, pandas as pd, logging
 from sklearn.preprocessing import StandardScaler
 
-RAW_DATA_DIR = "/content/drive/MyDrive/trading_ai/data/raw"   # same as Colab
+RAW_DATA_DIR   = "/content/drive/MyDrive/trading_ai/data/raw"
 PROCESSED_DATA_DIR = "/content/drive/MyDrive/trading_ai/data/processed"
-MODEL_DIR = "/content/drive/MyDrive/trading_ai/models"
+MODEL_DIR      = "/content/drive/MyDrive/trading_ai/models"
 
 logger = logging.getLogger(__name__)
-
-def load_model(tf):
-    path = os.path.join(MODEL_DIR, f"{tf}_model.pkl")
-    return pd.read_pickle(path) if os.path.exists(path) else None
 
 def prepare_features(df):
     cols = ['rsi','ema_9','ema_21','macd','macd_signal','vwap','volume_ma_ratio',
             'engulfing_signal','hammer','hanging_man','doji','morning_star','evening_star',
             'stoch_k','stoch_d','cci','adx','atr','bb_pos','ema_spread','ret_1','ret_3','vol_10','trend_regime']
-    feat = df.reindex(columns=cols).fillna(0).replace([np.inf, -np.inf], 0).clip(-1e6, 1e6)
+    feat = df.reindex(columns=cols).fillna(0).replace([pd.np.inf, -pd.np.inf], 0).clip(-1e6, 1e6)
     scaler = StandardScaler()
     return pd.DataFrame(scaler.fit_transform(feat), columns=feat.columns, index=feat.index)
 
 def run_pipeline_for_list(tickers):
-    """Lightweight inference – reads CSVs + predicts (no training)."""
+    """Reads CSVs → adds indicators → loads GPU-trained model → predicts."""
     results = []
     for symbol in tickers:
         try:
@@ -31,27 +26,40 @@ def run_pipeline_for_list(tickers):
                 raw[tf] = pd.read_csv(path, parse_dates=["datetime"]) if os.path.exists(path) else pd.DataFrame()
             if all(df.empty for df in raw.values()): continue
 
-            # add indicators (reuse your Cell-4 logic)
-            from main_indicators import add_indicators   # inline below
+            # ---- add indicators (reuse your Cell-4 logic) ----
             processed = {}
             for tf, df in raw.items():
                 if not df.empty:
-                    df = add_indicators(df)
+                    df = add_indicators(df)   # inline below
                     processed[tf] = df
             if not processed: continue
 
-            # load model & predict
+            # ---- load GPU-trained model → predict ----
             preds = {}
-            for tf, df in processed.items():
-                model = load_model(tf)
-                if model is None: continue
-                X = prepare_features(df.iloc[[-1]])
-                if X.empty: continue
+            for tf in ["5min", "15min", "1h", "1d"]:
+                model_path = os.path.join(MODEL_DIR, f"{tf}_model.pkl")
+                if not os.path.exists(model_path):
+                    preds[tf] = ("HOLD", 0.0); continue
+                model = pd.read_pickle(model_path)
+                X = prepare_features(processed[tf].iloc[[-1]])
+                if X.empty: preds[tf] = ("HOLD", 0.0); continue
                 pred = model.predict(X)[0]
                 prob = model.predict_proba(X)[0][pred]
                 preds[tf] = (["BUY", "HOLD", "SELL"][pred], round(prob * 100, 1))
-            if preds:
-                results.append({"symbol": symbol, **{f"{tf}": preds.get(tf, ("HOLD", 0.0))[0] for tf in ["5min", "15min", "1h", "1d"]}})
+
+            # ---- same shape as fake_signals ----
+            results.append({
+                "symbol": symbol,
+                "signal": preds.get("1d", ("HOLD", 0.0))[0],
+                "confidence": preds.get("1d", ("HOLD", 0.0))[1],
+                "entry": round(float(processed["1d"]["close"].iloc[-1]), 2),
+                "tp": round(float(processed["1d"]["close"].iloc[-1]) + 1.5 * float(processed["1d"]["atr"].iloc[-1]), 2),
+                "sl": round(float(processed["1d"]["close"].iloc[-1]) - 1.5 * float(processed["1d"]["atr"].iloc[-1]), 2),
+                "atr": round(float(processed["1d"]["atr"].iloc[-1]), 2),
+                "kelly": round(float(processed["1d"]["close"].iloc[-1]) * 0.25, 2),
+                "s1": round(float(processed["1d"]["low"].tail(20).min()), 2),
+                "r1": round(float(processed["1d"]["high"].tail(20).max()), 2),
+            })
         except Exception as e:
-            results.append({"symbol": symbol, "5min": "ERROR", "15min": "ERROR", "1h": "ERROR", "1d": "ERROR"})
+            results.append({"symbol": symbol, "signal": "ERROR", "confidence": 0.0, "entry": 0, "tp": 0, "sl": 0, "atr": 0, "kelly": 0, "s1": 0, "r1": 0})
     return pd.DataFrame(results)
